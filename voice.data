@@ -1,0 +1,4 @@
+data <- specan(1, 8, "test.wav", bp = c(0,22), wl = 2048)
+data <- as.data.frame(t(data))
+data <- data[, c(-1,-14)]
+write.csv(data, file='voice.test.csv', sep=',', row.names=F)
