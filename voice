@@ -1,0 +1,325 @@
+#----1.Tree,
+#----2.ramdomForest
+#----3.gbm
+#----4.logistic
+#----5.ridge
+#----6.lasso
+#----7.elastic net
+#----8.compare above 7 models
+
+
+voice <- read.csv("voice.csv")
+summary(voice)
+str(voice)
+table(voice$label)
+
+
+#---------------train/test data------------------------
+voice.train <- voice[c(-(1:150), -(3019:3168)), ]
+voice.test <- voice[c(1:150, 3019:3168),]
+summary(voice.train)
+str(voice.train)
+
+summary(voice.test)
+str(voice.test)
+
+y.train <- voice.train[, "label"]
+x.train <- voice.train[,1:20]
+x.test <- voice.test[,1:20]
+y.test <- voice.test[, "label"]
+
+
+##--------------1.tree---------------#
+library("tree")
+#grow a tree
+voice.tree <- tree(y.train ~ ., data=x.train)
+
+#pruning by cross-validation
+set.seed(123)
+voice.tree.cv <- cv.tree(voice.tree, method="misclass")
+
+# optimal tree size obtained by CV
+optimal <- which.min(voice.tree.cv$dev)
+optimal.size <- voice.tree.cv$size[optimal]
+optimal
+optimal.size
+
+# pruned tree
+voice.tree.pruned <- prune.tree(voice.tree, best=optimal.size, method="misclass")
+voice.tree.pruned
+plot(voice.tree.pruned)
+text(voice.tree.pruned)
+
+# prediction on test data
+prob.tree <- predict(voice.tree.pruned, newdata=x.test, type="vector")[, 2]
+
+# accuracy in test data
+pred.tree <- predict(voice.tree.pruned, newdata=x.test, type="class")
+tree.table <- table(pred.tree, y.test)
+tree.table
+tree.accuracy <- (tree.table[1, 1] + tree.table[2,2])/sum(tree.table)
+tree.accuracy
+
+
+
+
+#-------------2.RandomForest---------------#
+library("randomForest")
+
+# tune random forest (mtry) manually
+mse.rfs <- rep(0, 20)
+set.seed(123)
+for(m in 1:20){
+  rf <- randomForest(y.train ~ ., data=x.train, ntree=501, mtry=m)
+  mse.rfs[m] <- rf$err.rate[501]
+}
+plot(1:20, mse.rfs, type="b", xlab="mtry", ylab="OOB Error")
+m.optimal <- which.min(mse.rfs)
+
+# fit a random forest model
+set.seed(123)
+voice.rf <- randomForest(y.train ~ ., data=x.train,  ntree=501, mtry=m.optimal, importance=TRUE)
+voice.rf
+plot(voice.rf)
+
+# predict
+prob.rf <- predict(voice.rf, newdata=x.test, type="prob")[, 2]
+
+# accuracy in test data
+pred.rf <- predict(voice.rf, newdata=x.test, type="response")
+rf.table <- table(pred.rf, y.test)
+rf.table
+rf.accuracy <- (rf.table[1, 1] + rf.table[2,2])/sum(rf.table)
+rf.accuracy
+
+# variable importance
+varImpPlot(voice.rf)
+
+# partial plot in RF
+partialPlot(voice.rf, voice.train, x.var="meanfun", which.class="male")
+partialPlot(voice.rf, voice.train, x.var="IQR", which.class="male")
+
+
+
+
+#####---------3.gbm---------------#####
+library("gbm")
+y.train.gbm <- as.numeric(voice.train[, "label"]) - 1
+
+#-------GBM tuning---------
+# parameters under considerations
+#lambdas <- c(0.001, 0.0005, 0.0003)
+#l.size <- length(lambdas)
+#ds <- c(1, 2, 4)
+#d.size <- length(ds)
+#n.step <- 15
+
+# tune gbm by CV
+#tune.out <- data.frame()
+#for (j in 1:l.size) {
+  #lambda <- lambdas[j]
+  #for (i in 1:d.size) {
+    #d <- ds[i]
+    #for (n in (1:10) * n.step / (lambda * sqrt(d))) {
+      #set.seed(123)
+      #gbm.mod <- gbm(y.train.gbm ~ ., data=x.train, distribution="bernoulli", n.trees=n, interaction.depth=d, shrinkage=lambda, cv.folds=10)
+      #n.opt <- gbm.perf(gbm.mod, method="cv", plot.it=FALSE)
+      #if (n.opt / n < 0.95) break
+    #}
+    #cv.err <- gbm.mod$cv.error[n.opt]
+    #out <- data.frame(d=d, lambda=lambda, n=n, n.opt=n.opt, cv.err=cv.err)
+    #tune.out <- rbind(tune.out, out)
+  #}
+#}
+#tune.out
+
+
+#---gbm without tuning-----
+gbm.mod <- gbm(y.train.gbm ~ ., data=x.train, distribution="bernoulli", n.trees=601, interaction.depth=1, shrinkage=0.001, cv.folds=10)
+
+pred.gbm <- predict(gbm.mod, newdata=x.test, n.trees=601, type="response") >0.5
+table(y.test, pred.gbm)
+gbm.table <- table(pred.gbm, y.test)
+gbm.table
+gbm.accuracy <- (gbm.table[1, 1] + gbm.table[2,2])/sum(gbm.table)
+gbm.accuracy
+
+
+
+
+
+
+
+
+#---------4.logistic------------
+voice.glm <- glm(y.train ~ ., data=x.train, family=binomial(link="logit"))
+summary(voice.glm)
+
+library("MASS")
+glm.best <- stepAIC(voice.glm, direction="backward")
+summary(glm.best)
+
+## categorical prediction (use fixed cutoff = 0.5)
+prob.glm <- predict(glm.best, newdata=x.test, type="response")
+pred.glm <- (prob.glm > 0.5)
+
+glm.table <- table(pred.glm, y.test)
+glm.table
+glm.accuracy <- (glm.table[1, 1] + glm.table[2,2])/sum(glm.table)
+glm.accuracy
+
+
+
+#--------5.Ridge Regression-----------
+library("glmnet")
+x.train.ridge <- model.matrix(label ~ ., voice.train)[, -1]
+x.test.ridge <- model.matrix(label ~ ., voice.test)[, -1]
+
+
+# cross-validation
+set.seed(123)
+ridge.cv <- cv.glmnet(x.train.ridge, y.train, alpha=0, family="binomial", type.measure="class") 
+plot(ridge.cv)
+
+# optimal lambda
+ridge.lam <- ridge.cv$lambda.1se  # or ridge.cv$lambda.min
+
+# plot optimal model
+ridge.mod <- glmnet(x.train.ridge, y.train, alpha=0, family="binomial")
+plot(ridge.mod, xvar="lambda", label = TRUE)
+abline(v=log(ridge.lam), lty=2)
+
+# prediction
+ridge.pred <- predict(ridge.mod, newx=x.test.ridge, s=ridge.lam, type="response", exact=TRUE)
+
+
+#----6.Lasso-----------
+# cross-validation
+set.seed(123)
+lasso.cv <- cv.glmnet(x.train.ridge, y.train, alpha=1, family="binomial", type.measure="class")
+plot(lasso.cv)
+
+# optimal lambda
+lasso.lam <- lasso.cv$lambda.1se  # lasso.cv$lambda.min
+
+# plot optimal model
+lasso.mod <- glmnet(x.train.ridge, y.train, alpha=1, family="binomial")
+plot(lasso.mod, xvar="lambda", label = TRUE)
+abline(v=log(lasso.lam), lty=2)
+
+# prediction
+lasso.pred <- predict(lasso.mod, newx=x.test.ridge, s=lasso.lam, type="response", exact=TRUE)
+
+
+
+
+
+#########--------------7.Elastic Net---------------------#########
+
+alphas <- seq(0, 1, 0.05)
+K <- 10
+n <- nrow(x.train.ridge)
+fold <- rep(0, n)
+set.seed(123)
+shuffled.index <- sample(n, n, replace=FALSE)
+fold[shuffled.index] <- rep(1:K, length.out=n)
+table(fold)
+
+en.cv.error <- data.frame(alpha=alphas)
+for (i in 1:length(alphas)){
+  en.cv <- cv.glmnet(x.train.ridge, y.train, alpha=alphas[i], foldid=fold, family="binomial", type.measure="class")
+  en.cv.error[i, "lambda"] <- en.cv$lambda.1se
+  en.cv.error[i, "error"] <- min(en.cv$cvm) + en.cv$cvsd[which.min(en.cv$cvm)]
+}
+# optimal lambda and alpha
+en.lam <- en.cv.error[which.min(en.cv.error$error), "lambda"]
+en.alpha <- en.cv.error[which.min(en.cv.error$error), "alpha"]
+
+# plot optimal alpha
+plot(en.cv.error$alpha, en.cv.error$error, type="l")
+abline(v=en.alpha, lty=2)
+
+# plot the optimal model
+en.mod <- glmnet(x.train.ridge, y.train, alpha=en.alpha, family="binomial")
+plot(en.mod, xvar="lambda", label = TRUE)
+abline(v=log(en.lam), lty=2)
+
+# prediction
+en.pred <- predict(en.mod, newx=x.test.ridge, s=en.lam, type="response", exact=TRUE)
+
+
+
+
+
+
+#----------8.Comapre above model predictions, misclassfication rate, ROC, and AUC-------.
+library("ROCR")
+prob.tree <- predict(voice.tree.pruned, newdata=x.test)[, 2]
+prob.rf <- predict(voice.rf, newdata=x.test, type="prob")[, 2]
+prob.gbm <- predict(gbm.mod, newdata=x.test, n.trees=601, type="response")
+prob.glm <- predict(glm.best, newdata=x.test, type="response")
+ridge.pred <- predict(ridge.mod, newx=x.test.ridge, s=ridge.lam, type="response", exact=TRUE)
+lasso.pred <- predict(lasso.mod, newx=x.test.ridge, s=lasso.lam, type="response", exact=TRUE)
+en.pred <- predict(en.mod, newx=x.test.ridge, s=en.lam, type="response", exact=TRUE)
+
+prediction.tree <- prediction(prob.tree, y.test)
+prediction.rf <- prediction(prob.rf, y.test)
+prediction.gbm <- prediction(prob.gbm, y.test)
+prediction.lr <- prediction(prob.glm, y.test)
+prediction.ridge <- prediction(ridge.pred, y.test)
+prediction.lasso <- prediction(lasso.pred, y.test)
+prediction.en <- prediction(en.pred, y.test)
+
+# misclassification rate
+err.tree <- performance(prediction.tree, measure = "err")
+err.rf <- performance(prediction.rf, measure = "err")
+err.gbm <- performance(prediction.gbm, measure = "err")
+err.lr <- performance(prediction.lr, measure = "err")
+err.ridge <- performance(prediction.ridge, measure = "err")
+err.lasso <- performance(prediction.lasso, measure = "err")
+err.en <- performance(prediction.en, measure = "err")
+
+plot(err.tree, xlim=c(0, 1), ylim=c(0, 0.5), col="red")
+plot(err.rf, col="orange", add=TRUE)
+plot(err.gbm, col="yellow", add=TRUE)
+plot(err.lr, col="green",add=TRUE)
+plot(err.ridge, add=TRUE, col="blue")
+plot(err.lasso, add=TRUE, col="purple")
+plot(err.en, add=TRUE, col="black")
+
+# ROC plot
+ROC.tree <- performance(prediction.tree, measure = "tpr", x.measure = "fpr")
+ROC.rf <- performance(prediction.rf, measure = "tpr", x.measure = "fpr")
+ROC.gbm<- performance(prediction.gbm, measure = "tpr", x.measure = "fpr")
+ROC.lr <- performance(prediction.lr, measure = "tpr", x.measure = "fpr")
+ROC.ridge <- performance(prediction.ridge, measure = "tpr", x.measure = "fpr")
+ROC.lasso <- performance(prediction.lasso, measure = "tpr", x.measure = "fpr")
+ROC.en <- performance(prediction.en, measure = "tpr", x.measure = "fpr")
+
+
+plot(ROC.tree, col="red")
+plot(ROC.rf, add=TRUE, col="orange")
+plot(ROC.gbm, add=TRUE, col="yellow")
+plot(ROC.lr, add=TRUE,col="green")
+plot(ROC.ridge, add=TRUE, col="blue")
+plot(ROC.lasso, add=TRUE, col="purple")
+plot(ROC.en, add=TRUE, col="black")
+abline(a=0, b=1, lty=2) # diagonal line
+
+# AUC
+as.numeric(performance(prediction.tree, "auc")@y.values)
+as.numeric(performance(prediction.rf, "auc")@y.values)
+as.numeric(performance(prediction.gbm, "auc")@y.values)
+as.numeric(performance(prediction.lr, "auc")@y.values)
+as.numeric(performance(prediction.ridge, "auc")@y.values)
+as.numeric(performance(prediction.lasso, "auc")@y.values)
+as.numeric(performance(prediction.en, "auc")@y.values)
+
+
+
+
+
+
+
+
+
